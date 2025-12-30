@@ -1,10 +1,14 @@
 # src/charset.py
-# Defines full printable ASCII characters and mappings for OCR
-
 import string
 
-# Full printable ASCII characters (95 chars)
-ASCII_CHARS = string.printable[:-6]  # remove last 6 non-printable whitespace chars
+# Full printable ASCII characters
+all_chars = string.printable[:-6]  # remove last 6 non-printable whitespace chars
+
+# Illegal filename characters on Windows
+ILLEGAL_CHARS = '<>:"/\\|?*_.!@#$%^&()+=`~,;\' '
+
+# Filter out illegal characters
+ASCII_CHARS = "".join(c for c in all_chars if c not in ILLEGAL_CHARS)
 
 # Create mappings
 char_to_idx = {c: i for i, c in enumerate(ASCII_CHARS)}

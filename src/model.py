@@ -1,48 +1,25 @@
 # src/model.py
-import torch
-import torch.nn as nn
-from src.charset import NUM_CLASSES
+import tensorflow as tf
 
-class CRNN(nn.Module):
-    def __init__(self, num_classes=NUM_CLASSES):
-        super().__init__()
-        # CNN layers
-        self.cnn = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),  # [B,64,32,128]
-            nn.ReLU(),
-            nn.MaxPool2d(2,2),                            # [B,64,16,64]
+layers = tf.keras.layers
+models = tf.keras.models
 
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2,2),                            # [B,128,8,32]
+def build_crnn(input_shape=(32,128,1), num_classes=95):
+    inputs = layers.Input(shape=input_shape, name="image")
 
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d((2,1)),                          # [B,256,4,32]
+    # CNN
+    x = layers.Conv2D(64, (3,3), activation='relu', padding='same')(inputs)
+    x = layers.MaxPooling2D((2,2))(x)
+    x = layers.Conv2D(128, (3,3), activation='relu', padding='same')(x)
+    x = layers.MaxPooling2D((2,2))(x)
 
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d((2,1))                           # [B,256,2,32]
-        )
+    # Collapse height dimension
+    x = layers.Reshape((x.shape[2], x.shape[1]*x.shape[3]))(x)  # (W, features)
 
-        # LSTM layers
-        self.lstm = nn.LSTM(
-            input_size=256*2,   # height*channels
-            hidden_size=256,
-            num_layers=2,
-            bidirectional=True,
-            batch_first=True
-        )
+    # RNN
+    x = layers.Bidirectional(layers.LSTM(128, return_sequences=True))(x)
+    x = layers.Bidirectional(layers.LSTM(128, return_sequences=True))(x)
 
-        # Final output layer
-        self.fc = nn.Linear(512, num_classes)
-
-    def forward(self, x):
-        x = self.cnn(x)               # [B, C, H, W]
-        b, c, h, w = x.size()
-        x = x.permute(0, 3, 1, 2)    # [B, W, C, H]
-        x = x.reshape(b, w, c*h)     # flatten H
-        x, _ = self.lstm(x)           # [B, W, 512]
-        x = self.fc(x)                # [B, W, num_classes]
-        x = x.log_softmax(2)          # log-probabilities for CTC loss
-        return x
+    outputs = layers.Dense(num_classes, activation='softmax')(x)
+    model = models.Model(inputs, outputs)
+    return model

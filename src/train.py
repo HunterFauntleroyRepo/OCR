@@ -1,13 +1,7 @@
-# src/train.py
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from dataset import OCRDataset
-from src.model import CRNN
-from src.charset import idx_to_char, NUM_CLASSES
-from tqdm import tqdm
 import os
+import tensorflow as tf
+from dataset import OCRDataset
+from model import build_crnn
 
 # Paths
 TRAIN_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "train"))
@@ -15,72 +9,57 @@ VAL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", 
 
 # Hyperparameters
 BATCH_SIZE = 32
-LR = 1e-3
-EPOCHS = 20
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+EPOCHS = 5
+NUM_CLASSES = 95
 
-# Load datasets
-train_dataset = OCRDataset(TRAIN_DIR)
-val_dataset = OCRDataset(VAL_DIR)
+# Datasets
+train_dataset = OCRDataset(TRAIN_DIR).get_dataset(batch_size=BATCH_SIZE)
+val_dataset = OCRDataset(VAL_DIR).get_dataset(batch_size=BATCH_SIZE, shuffle=False)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
+# Model
+model = build_crnn(num_classes=NUM_CLASSES)
+optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
 
-# Initialize model, optimizer, loss
-model = CRNN(num_classes=NUM_CLASSES).to(DEVICE)
-optimizer = optim.Adam(model.parameters(), lr=LR)
-criterion = nn.CTCLoss(blank=NUM_CLASSES-1, zero_infinity=True)  # last index is used as blank
+# CTC Loss function
+def ctc_loss(y_true, y_pred, label_length):
+    """
+    y_true: padded label sequences [B, max_label_len]
+    y_pred: [B, W, num_classes]
+    label_length: actual length of each sequence [B,1]
+    """
+    batch_len = tf.shape(y_true)[0]
+    input_len = tf.shape(y_pred)[1]
+    input_len = input_len * tf.ones(shape=(batch_len,1), dtype=tf.int32)
+    loss = tf.keras.backend.ctc_batch_cost(y_true, y_pred, input_len, label_length)
+    return loss
 
-def train_one_epoch(epoch):
-    model.train()
+
+# Training step
+@tf.function
+def train_step(images, labels, label_length):
+    with tf.GradientTape() as tape:
+        y_pred = model(images, training=True)
+        loss = ctc_loss(labels, y_pred, label_length)
+    grads = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    return loss
+
+# Training loop
+for epoch in range(1, EPOCHS+1):
+    print(f"Epoch {epoch}/{EPOCHS}")
     running_loss = 0
-    for imgs, labels, lengths in tqdm(train_loader, desc=f"Epoch {epoch}"):
-        imgs = imgs.to(DEVICE)
-        labels = labels.to(DEVICE)
+    num_batches = 0
+    for batch in train_dataset:
+        loss = train_step(batch['image'], batch['label'], batch['label_length'])
+        running_loss += tf.reduce_mean(loss)
+        num_batches += 1
 
-        optimizer.zero_grad()
-        preds = model(imgs)                  # [B, W, num_classes]
-        preds = preds.permute(1,0,2)         # CTC expects [W, B, C]
-        pred_lengths = torch.full(size=(preds.size(1),), fill_value=preds.size(0), dtype=torch.long)
+    print(f"Training loss: {running_loss/num_batches:.4f}")
 
-        loss = criterion(preds, labels, pred_lengths, lengths)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
-    print(f"Epoch {epoch} training loss: {running_loss/len(train_loader):.4f}")
 
-def evaluate():
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for imgs, labels, lengths in val_loader:
-            imgs = imgs.to(DEVICE)
-            preds = model(imgs)
-            preds = preds.argmax(2)           # greedy decode [B,W]
-            for i in range(preds.size(0)):
-                pred_text = ""
-                prev = -1
-                for p in preds[i]:
-                    p = p.item()
-                    if p != prev and p != NUM_CLASSES-1:
-                        pred_text += idx_to_char[p]
-                    prev = p
-                label_text = "".join([idx_to_char[l.item()] for l in labels[i]])
-                if pred_text == label_text:
-                    correct +=1
-                total +=1
-    acc = correct / total
-    print(f"Validation Accuracy: {acc*100:.2f}%")
-
-if __name__ == "__main__":
-    for epoch in range(1, EPOCHS+1):
-        train_one_epoch(epoch)
-        evaluate()
-
-    # Save the trained model
-    models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
-    os.makedirs(models_dir, exist_ok=True)
-    model_path = os.path.join(models_dir, "crnn_ocr.pth")
-    torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+# Save the model
+models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
+model_path = os.path.join(models_dir, "ocr_simple_tf.keras")
+model.save(model_path)
+print(f"Model saved to {model_path}")
+print("Training complete.")
